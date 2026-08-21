@@ -41,7 +41,7 @@ ENV TZ=Etc/UTC
 # The memory side is address space, not resident memory. A threaded BLAS reserves
 # per-thread buffers at library load, before any BLAS call: measured 136 MB per
 # thread for OpenBLAS 0.3.26 and 72 MB per thread for MKL under GNU. RSS does not
-# move. That is harmless until something enforces a virtual-memory limit —
+# follow: it moved 1.2 MB across 15 extra threads. That is harmless until something enforces a virtual-memory limit —
 # ulimit -v, LSF -v, SGE h_vmem — where sixteen workers reserving 2.2 GB each
 # kill a job whose RSS never passed 1 GB.
 #
