@@ -47,7 +47,7 @@ apptainer exec \
 
 | Tag | GGIR | Notes |
 |-----|------|-------|
-| **08212026** (Latest) | 3.3-8 · [`62346165`](https://github.com/wadpac/GGIR/commit/62346165ce1dd43ac83c26343b8a2658be24fa7c) | **Intel MKL removed**; the image now uses the base image's OpenBLAS pinned to one thread. Measured indistinguishable from MKL at the settings this image ships with, and **4.34 GB → 1.92 GB**. Also removes a hard failure mode: with the thread variables unset the MKL build died on its first BLAS call, where OpenBLAS simply falls back to all cores. `OPENBLAS_NUM_THREADS=1` replaces `MKL_THREADING_LAYER`/`MKL_NUM_THREADS`. Details in [Phase 1](#phase-1-intel-mkl--tried-measured-removed). |
+| **08212026** (Latest) | 3.3-8 · [`62346165`](https://github.com/wadpac/GGIR/commit/62346165ce1dd43ac83c26343b8a2658be24fa7c) | **Intel MKL removed**; the image now uses the base image's OpenBLAS pinned to one thread. Measured indistinguishable from MKL at the settings this image ships with, and **4.34 GB → 1.92 GB** uncompressed. Also removes a hard failure mode: with the thread variables unset the MKL build died on its first BLAS call, where OpenBLAS simply falls back to all cores. `OPENBLAS_NUM_THREADS=1` replaces `MKL_THREADING_LAYER`/`MKL_NUM_THREADS`. Details in [Phase 1](#phase-1-intel-mkl--tried-measured-removed). |
 | 05092026 | 3.3-7 · [`388064b7`](https://github.com/wadpac/GGIR/commit/388064b707df4fcfb7f9b755c5a43a477d371092) | Added unisensR for Movisens (.unisens) format support — pairs with `libxml2-dev` that was previously bundled but unused. `MKL_THREADING_LAYER` switched from `GNU` to `SEQUENTIAL`: no OpenMP runtime loaded into R, so no per-thread address space reserved in each of GGIR's PSOCK workers. (Superseded by 08212026, which removed MKL entirely.) Container TZ explicitly UTC (pass `desiredtz=` to GGIR for participant local time). `/etc/ggir-version` stamps installed GGIR version + upstream commit SHA for provenance. Build-time smoke test prevents shipping broken images. |
 | 04152026 | 3.3-4 | Rcpp pre-installed for compatibility with the [Rcpp-optimized GGIR fork](https://github.com/j262byuu/GGIR/tree/feature/rcpp-enmo). Intel MKL as default BLAS/LAPACK backend. GGIR installed from official upstream (wadpac/GGIR). `MKL_NUM_THREADS` locked to 1 by default to prevent thread contention during GGIR's file-level parallelization. UTF-8 locale set for timestamp parsing edge cases. |
 | 04022026 | 3.3-4 | Intel MKL integrated (Debian `intel-mkl`, version 2020.4.304). GGIR from official upstream. Note this is where the image grew: `intel-mkl` pulls ~1.2 GB of MKL packages, ~1.0 GB of it `-dev` files a runtime image never opens. |
@@ -273,7 +273,9 @@ and never touched. Virtual-memory limits notice; the OOM killer does not.
 *Size.* Debian's `intel-mkl` metapackage pulls roughly 1.2 GB of MKL packages, about
 1.0 GB of it `-dev` files a runtime image never opens — `libmkl-computational-dev` at
 640 MB, `libmkl-threading-dev` at 270 MB, `libmkl-interface-dev` at 124 MB. Removing
-MKL took the image from **4.34 GB to 1.92 GB**.
+MKL took the image from **4.34 GB to 1.92 GB**. Those are uncompressed on-disk sizes
+as reported by `docker images`; Docker Hub lists the compressed size, which is roughly
+a quarter of it, so the two pages will not agree.
 
 *A hard failure mode.* With `MKL_THREADING_LAYER`, `MKL_NUM_THREADS` and
 `OMP_NUM_THREADS` all unset, R in the MKL image died on its first BLAS call:
@@ -303,7 +305,7 @@ BLAS, so no BLAS is going to move them.
 | BLAS threads, as shipped | 1 | 1 |
 | `getDTthreads()`, as shipped | 1 | 1 |
 | all thread variables unset | works; 16 threads, 0.03 s | **R dies on first BLAS call** |
-| image size | **1.92 GB** | 4.34 GB |
+| image size, uncompressed | **1.92 GB** | 4.34 GB |
 
 ### Phase 2: Upstream patches to GGIR — measured, not yet submitted
 
