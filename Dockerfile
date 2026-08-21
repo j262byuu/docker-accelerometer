@@ -3,7 +3,7 @@
 # Base: rocker/r-ver (Ubuntu-based, minimal, version-locked)
 # Target: batch processing on HPC (Singularity/Apptainer compatible)
 # GGIR source: GitHub master (wadpac/GGIR), always latest version
-# Parallel: foreach + doParallel (fork-based, no extra system deps needed)
+# Parallel: foreach + doParallel over PSOCK workers (separate R processes, not fork)
 # BLAS/LAPACK: Intel MKL (Math Kernel Library) for hardware acceleration
 # =============================================================================
 FROM rocker/r-ver:4.5.3
@@ -18,17 +18,45 @@ ENV TZ=Etc/UTC
 # -----------------------------------------------------------------------------
 # MKL & Threading Environment Variables (CRITICAL FOR GGIR)
 #
-# GGIR parallelizes via doParallel (forked R workers). Each worker must use a
-# single-threaded BLAS — otherwise N workers × M MKL threads oversubscribes the
-# CPU, and the fork-OpenBLAS-style per-thread buffer bloat eats RAM linearly
-# in N. The whole point of using MKL here is per-process memory footprint.
+# DO NOT REMOVE THESE THREE LINES. Two of them are load-bearing for correctness,
+# not performance: with all three unset, R in this image dies on its first BLAS
+# call with
 #
-# MKL_THREADING_LAYER=SEQUENTIAL: do not load any threading runtime inside MKL.
-#   Stronger than NUM_THREADS=1 alone — no libgomp pulled into the process,
-#   no OpenMP state across fork(), minimum per-worker RSS.
+#   libmkl_intel_thread.so: undefined symbol: __kmpc_global_thread_num
 #
-# MKL_NUM_THREADS / OMP_NUM_THREADS=1: belt-and-suspenders in case any
-#   transitive component outside MKL itself consults these.
+# The Debian intel-mkl package ships libmkl_intel_thread.so, which needs Intel's
+# own OpenMP runtime (libiomp5); that runtime is not installed here — only
+# libgomp is. So libmkl_rt's default INTEL threading layer cannot load. Either
+# SEQUENTIAL or the thread caps avoids it; dropping all three does not.
+# GNU is the working multithreaded layer, because libgomp is present.
+#
+# Why single-threaded at all: GGIR parallelises with
+# parallel::makeCluster(Ncores2use), no type= argument, at all seven of its
+# parallel sites, so the workers are PSOCK — separate R processes sharing
+# nothing with the parent at any point. Each loads its own BLAS and reserves its
+# own thread buffers, so cost is strictly linear in the worker count, with none
+# of the copy-on-write relief a forked pool would give. N workers × M BLAS
+# threads also oversubscribe the CPU.
+#
+# The memory side is address space, not resident memory. A threaded BLAS reserves
+# per-thread buffers at library load, before any BLAS call: measured 136 MB per
+# thread for OpenBLAS 0.3.26 and 72 MB per thread for MKL under GNU. RSS does not
+# move. That is harmless until something enforces a virtual-memory limit —
+# ulimit -v, LSF -v, SGE h_vmem — where sixteen workers reserving 2.2 GB each
+# kill a job whose RSS never passed 1 GB.
+#
+# MKL_THREADING_LAYER=SEQUENTIAL: load no threading runtime inside MKL at all,
+#   rather than loading one and capping it at a single thread.
+#
+# MKL_NUM_THREADS=1: redundant while SEQUENTIAL holds, kept because it is the arm
+#   that still protects the image if anyone overrides the threading layer.
+#
+# OMP_NUM_THREADS=1: covers components outside MKL that consult it. Note this
+#   also caps data.table, whose initDTthreads() ends in
+#   imin(ans, omp_get_max_threads()) — measured 8 threads -> 1 on data.table
+#   1.18.2.1. Right for GGIR batch runs, where each worker should stay
+#   single-threaded; override it for downstream analysis inside this container.
+#   See README, "Configuring parallelism".
 # -----------------------------------------------------------------------------
 ENV MKL_THREADING_LAYER=SEQUENTIAL
 ENV MKL_NUM_THREADS=1
