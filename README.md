@@ -239,8 +239,9 @@ brought that fragility. Details in the same section.
 
 ### Phase 2: Upstream patches to GGIR — measured, not yet submitted
 
-Fourteen branches on [j262byuu/GGIR](https://github.com/j262byuu/GGIR/branches/all),
-thirteen of them proposed for upstream submission. Every figure below is paired
+Fifteen branches on [j262byuu/GGIR](https://github.com/j262byuu/GGIR/branches/all) —
+fourteen below plus the one in Phase 3 — of which thirteen are proposed for upstream
+submission. The two that are not are marked *held* and *withdrawn* in the last table. Every figure below is paired
 against `main`: both arms built from the same source, run back to back inside one LSF
 job on one physical host, seven replicates over ten UK Biobank `.cwa` recordings
 (100 Hz, ~6.9 days each). "7/7" means the branch was faster in all seven pairs.
@@ -313,8 +314,7 @@ each one names the condition under which it would not be.
 
 The single largest effect found, and it is not a GGIR defect. In a configuration that
 runs the Verisense step counter, that one external function is about 90% of pipeline
-wall clock — more than all thirteen branches above combined, by two orders of
-magnitude.
+wall clock — more than every branch above combined, by two orders of magnitude.
 
 GGIR's bundled `user-scripts/verisense_count_steps.R` is **already the fast form**. The
 slow copy was our own lab's, and this is worth checking if you inherited a
