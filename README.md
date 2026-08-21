@@ -192,6 +192,11 @@ Systematic profiling of GGIR Part 1 on a 251 MB Axivity CWA file (7-day, 100Hz) 
 | Other (non-wear detection, data management) | 76 s | 17% |
 | **Total** | **451 s** | |
 
+Two things this profile does not show. It was taken **without** the Verisense step
+counter, which dominates everything here when it is enabled — see Phase 3. And the
+75% term lives in `GGIRread`, a separate package, so it is out of scope for this
+image and for the GGIR branches in Phase 2.
+
 ### Phase 1: Intel MKL ✅
 
 Replaced default R BLAS/LAPACK with Intel MKL. After profiling GGIR's source code, I confirmed that GGIR's core computations (ENMO, epoch aggregation, non-wear detection) are element-wise vector operations that do not call BLAS. The `g.calibrate` ellipsoid fitting uses `lm.wfit` (QR decomposition), but on matrices of only 3 columns, too small for MKL to make a measurable difference.
@@ -232,41 +237,111 @@ threading layer that cannot load in this image, so `MKL_THREADING_LAYER=SEQUENTI
 load-bearing for the image to work at all, not an optimisation. OpenBLAS would not have
 brought that fragility. Details in the same section.
 
-### Phase 2: Fused Rcpp ENMO Path ✅ (validated, pending upstream merge)
+### Phase 2: Upstream patches to GGIR — measured, not yet submitted
 
-Replaced `g.applymetrics`' ENMO computation chain (`EuclideanNorm` -> subtract -> clamp -> `cumsum`-based epoch averaging) with a single-pass C++ implementation (`enmoFusedCpp`). Fork: [j262byuu/GGIR@feature/rcpp-enmo](https://github.com/j262byuu/GGIR/tree/feature/rcpp-enmo). Not yet included in the Docker image; will be integrated after upstream merge or when stability is fully confirmed. To use it now:
+Fourteen branches on [j262byuu/GGIR](https://github.com/j262byuu/GGIR/branches/all),
+thirteen of them proposed for upstream submission. Every figure below is paired
+against `main`: both arms built from the same source, run back to back inside one LSF
+job on one physical host, seven replicates over ten UK Biobank `.cwa` recordings
+(100 Hz, ~6.9 days each). "7/7" means the branch was faster in all seven pairs.
 
-```r
-remotes::install_github("j262byuu/GGIR@feature/rcpp-enmo", dependencies = NA, upgrade = "never")
-```
+**Combined, thirteen branches merged into one, whole pipeline, ten recordings:**
 
-Benchmarked on simulated 7-day 100Hz data (60.5M samples):
-
-| Metric | Original R | Rcpp | Improvement |
+| Image | BLAS | Effect | Sign |
 |---|---|---|---|
-| Time per call | 10.16 s | 1.45 s | **7.0x faster** |
-| Peak memory | 6,597 MB | 2,806 MB | **57% less** |
-| Correctness | Reference | max diff < 1e-11 | **PASS** |
-| NA handling | cumsum propagates NA forward | NA limited to affected epoch | **Improved** |
+| this image (MKL `SEQUENTIAL`, already thread-capped) | sequential | **−21.88 s** / −3.32% | 7/7 |
+| `rocker/r-ver:4.5.3`, a default install | openblas-pthread | **−113.54 s** / −12.19% | 7/7 |
 
-The implementation accepts a `NumericMatrix` (zero-copy from R) rather than three separate column vectors, trading a small amount of speed (7x vs 8.6x with separate vectors) for less memory allocation at the R call boundary.
+Quote the absolute figure rather than the percentage: the two baselines differ (658 s
+against 932 s) precisely because the unoptimised one is slower, so the ratio moves with
+both terms. Both figures **understate a large cohort**, because the four cohort-scale
+branches below contribute nothing at ten recordings by construction.
 
-The primary value of this optimization is **memory reduction in parallel processing**. Each worker saves ~3.8 GB of transient allocations, allowing more concurrent workers on HPC nodes.
+The gap between those two rows is almost entirely one branch,
+`fix/nested-parallelism-thread-explosion`. **Users of this image already have that
+benefit** — the thread variables baked into the Dockerfile do the same job from
+outside — which is why this image's row is the smaller one.
 
-Note: end-to-end Part 1 speedup is modest because ENMO computation accounts for only 7% of total runtime. The dominant bottleneck is CWA/CSV file I/O (75%), which is addressed in Phase 3.
+#### Largest and self-contained
 
-### Phase 3: CWA Reader Acceleration 🔧
+| Branch | Effect | Equivalence |
+|---|---|---|
+| [`perf/haspt-runmed`](https://github.com/j262byuu/GGIR/tree/perf/haspt-runmed) | **part 3 −34.0%** (−11.362 s, sd 0.877, 7/7) | bit-identical; `HASPT` falls from 51.8% of part 3 to 0.6% |
+| [`perf/detecmidnight-vectorise`](https://github.com/j262byuu/GGIR/tree/perf/detecmidnight-vectorise) | **part 3 −5.4%** (−2.064 s, sd 0.377, 7/7) | bit-identical; the vectorised step is 0.870 s → 0.044 s |
 
-Targeting `GGIRread::readAxivity`, which accounts for 75% of Part 1 runtime. Profiling breakdown:
+Both replace a per-epoch R closure — `zoo::rollapply` with a median callback, and a
+`strsplit()` timestamp parser — that ran on the order of 10⁴–10⁵ times per night.
 
-- `readBin` (R-level binary I/O): 77.5 s, 490K R function calls for per-block reading
-- `readDataBlock` (block parsing loop): 67.6 s, per-block header/checksum/unpack in R
-- `resample` (interpolation to uniform grid): 26.9 s, already C-implemented in GGIRread
-- `timestampDecoder` + `AxivityNumUnpack` + bit operations: 20 s
+#### Parallelism: one correctness fix and one speedup that depends on it
 
-A C prototype replacing the per-block R loop with a single-pass C parser achieved **6.1x speedup** (176 s -> 29 s) on a 251 MB CWA file. Correctness validation is in progress. This work targets the GGIRread package (separate from GGIR).
+| Order | Branch | Effect |
+|---|---|---|
+| 1 | [`perf/stopcluster-onexit`](https://github.com/j262byuu/GGIR/tree/perf/stopcluster-onexit) | Not a speedup. All seven parallel sections registered `on.exit(stopCluster(cl))` only *after* the `%dopar%` loop, so an interrupt during the parallel section leaked workers for the rest of the session. On interrupt `main` leaves 4 open worker sockets; this leaves 0 |
+| 2 | [`fix/nested-parallelism-thread-explosion`](https://github.com/j262byuu/GGIR/tree/fix/nested-parallelism-thread-explosion) | **part 1 −18.9%** (−113.80 s, sd 62.75, 7/7) on a threaded-BLAS build, and **nothing** where the BLAS is already sequential — see the note above |
 
-Additionally, Part 1 reads each file twice (`g.calibrate` + `g.getmeta`), which doubles I/O cost. A single-read architecture could further halve I/O time.
+The second sits on the first and was measured against it, so they go up in that order.
+Related to [wadpac/GGIR#1442](https://github.com/wadpac/GGIR/issues/1442).
+
+#### Quadratic in cohort size — zero at ten recordings, large at 640
+
+These measure as exactly nothing at the scale a functional test uses. That is a
+statement about the cohort, not about the code, so each one carries its curve rather
+than a single number.
+
+| Branch | At 640 recordings | Shape |
+|---|---|---|
+| [`perf/part5-file-index`](https://github.com/j262byuu/GGIR/tree/perf/part5-file-index) | 4.550 s → 0.007 s (**650x**) | O(F²): a `dir()` per recording over a directory of F files |
+| [`perf/write-parquet-index`](https://github.com/j262byuu/GGIR/tree/perf/write-parquet-index) | 305.076 s → 2.791 s (**109x**) | O(N²) → O(N) key lookup. Nothing inside GGIR calls it; reached only via the exported `write_dashboard_parquet` |
+| [`perf/report-part4-index`](https://github.com/j262byuu/GGIR/tree/perf/report-part4-index) | 0.075 s → 0.003 s (**25x**) | O(F²), small constant |
+| [`perf/report-part5-aggregate-column`](https://github.com/j262byuu/GGIR/tree/perf/report-part5-aggregate-column) | 0.680 s → 0.103 s (**6.6x**) at 89,600 rows | **Linear** — 13 columns aggregated where 1 is read. A constant factor, not a scaling fix |
+
+#### Measured at or near zero — conditional, held, or withdrawn
+
+Listed because a measurement that came back empty is still a result, and because
+each one names the condition under which it would not be.
+
+| Branch | Measured | Status |
+|---|---|---|
+| [`perf/part5-timestamp-hoist`](https://github.com/j262byuu/GGIR/tree/perf/part5-timestamp-hoist) | part 5 −2.3% (−0.523 s, sd 0.340, 7/7) | Small but consistent |
+| [`perf/part1-chunkloop-deadwork`](https://github.com/j262byuu/GGIR/tree/perf/part1-chunkloop-deadwork) | −5.367 s, sd 9.377 | To be split. The `ClipLog` half is clean dead-work removal — the whole matrix was re-divided on every loop iteration |
+| [`perf/applymetrics-en-guard`](https://github.com/j262byuu/GGIR/tree/perf/applymetrics-en-guard) | no timing obtained | Conditional, and the default configuration is not one of the conditions: `do.enmo` is on by default, so the skip never fires. Only helps runs asking for angle or zero-crossing metrics alone |
+| [`perf/part6-timestamp-hoist`](https://github.com/j262byuu/GGIR/tree/perf/part6-timestamp-hoist) | +0.100 s, sd 0.261 | Real at 5 s epochs, absent under `part5_agg2_60seconds = TRUE`, which makes the series 12x shorter. Would be wrong to claim unconditionally |
+| [`perf/part4-version-hoist`](https://github.com/j262byuu/GGIR/tree/perf/part4-version-hoist) | −0.068 s, sd 0.245 | **Held.** `installed.packages()` costs 3 ms once R caches it, not the 10 ms assumed. No measurable gain and no bug fixed |
+| [`perf/reuse-parsed-header`](https://github.com/j262byuu/GGIR/tree/perf/reuse-parsed-header) | +4.031 s, sd 24.575 | **Withdrawn.** The cache does engage, but `readAxivity` spends no measurable time parsing the header. The underlying bug is real — `main` reads `accread$header`, a field that does not exist on that object, on every chunk of every file — and is filed upstream as an issue instead |
+
+### Phase 3: Verisense step counting — check which copy you are running
+
+The single largest effect found, and it is not a GGIR defect. In a configuration that
+runs the Verisense step counter, that one external function is about 90% of pipeline
+wall clock — more than all thirteen branches above combined, by two orders of
+magnitude.
+
+GGIR's bundled `user-scripts/verisense_count_steps.R` is **already the fast form**. The
+slow copy was our own lab's, and this is worth checking if you inherited a
+`myfun` from somewhere:
+
+| Change | Effect | Equivalence |
+|---|---|---|
+| lab copy → GGIR's bundled copy | **9.24x on part 1**, end to end (n = 5 pairs) | 15/15 chunks `identical()` |
+| bundled copy → [`perf/verisense-vectorise`](https://github.com/j262byuu/GGIR/tree/perf/verisense-vectorise) | **11.9x** (56.8 s → 4.8 s) | 15/15 `identical()` |
+
+The vectorised rewrite keeps the same signature, the same coefficient order and the
+same `fs = 15`, bug-for-bug. `user-scripts/` is in `.Rbuildignore` so the file does not
+ship with the package, but the vignettes link to it, so it is the canonical copy.
+
+These figures are **not additive** with Phase 2's: they were measured against a
+different starting point and change a different thing.
+
+### What is deliberately not claimed
+
+- The combined figure was measured before `perf/reuse-parsed-header` was withdrawn and
+  before `perf/verisense-vectorise` existed, so the merged set is not exactly the set
+  now proposed. Neither swap moves the number materially, but it has not been
+  re-measured.
+- `mode = 1:6` in one job yields a pipeline total, so the combined run gives no
+  per-stage split. Per-stage figures come from the individual branches.
+- None of these branches has been submitted upstream yet. Until they are merged, the
+  only way to use them is to install the branch directly.
 
 ## Contact
 
