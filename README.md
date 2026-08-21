@@ -98,10 +98,9 @@ $ docker run --rm --cpus=2 rocker/r-ver:4.5.3 cat /sys/fs/cgroup/cpu.max
 200000 100000        # quota / period = 2 CPUs
 ```
 
-With `maxNcores` left unset, that 2-CPU container starts **up to 15 worker
-processes** — one per file, capped at `detectCores() - 1`. The
-same thing happens under a scheduler: a 4-slot LSF allocation on a large node reports
-`detectCores()` = 128.
+With `maxNcores` left unset, that 2-CPU container starts **up to 15 worker processes**
+— one per file, capped at `detectCores() - 1`. The same thing happens under a
+scheduler: a 4-slot LSF allocation on a large node reports `detectCores()` = 128.
 
 **Always pass `maxNcores` explicitly.** Match it to what you were allocated, not to
 what the node has:
@@ -133,11 +132,10 @@ change the BLAS, or run the same script outside the container.
 A threaded BLAS also reserves per-thread buffers when the library loads, before any
 BLAS call is made. Measured on `rocker/r-ver:4.5.3`: **136 MB of address space per
 thread** for OpenBLAS 0.3.26, so 2.2 GB of `VmSize` at a 16-thread default. This is
-reserved address space, not resident memory: `VmRSS` moved by 1.2 MB across those
-same 15 extra threads. It is harmless
-until something enforces a virtual-memory limit (`ulimit -v`, LSF `-v`, SGE `h_vmem`),
-where sixteen workers reserving 2.2 GB apiece will kill a job whose RSS never passed
-1 GB.
+reserved address space, not resident memory: `VmRSS` moved by 1.2 MB across those same
+15 extra threads. It is harmless until something enforces a virtual-memory limit
+(`ulimit -v`, LSF `-v`, SGE `h_vmem`), where sixteen workers reserving 2.2 GB apiece
+will kill a job whose RSS never passed 1 GB.
 
 ### data.table is capped to one thread in this image
 
