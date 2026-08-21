@@ -1,6 +1,11 @@
-# docker-GGIR
+# docker-accelerometer
 
-A Docker image for [GGIR](https://wadpac.github.io/GGIR/) accelerometer data processing (`j262byuu/accelerometer`), optimized for high-throughput batch processing on HPC clusters.
+A Docker image for [GGIR](https://wadpac.github.io/GGIR/) accelerometer data processing, published as `j262byuu/accelerometer`, built for high-throughput batch processing on HPC clusters.
+
+> Renamed from `docker-GGIR-mkl` in August 2026, after Intel MKL was measured and
+> removed — see [Phase 1](#phase-1-intel-mkl--tried-measured-removed). GitHub redirects
+> the old repository URL, and **the Docker Hub image name has not changed**, so existing
+> `docker pull` and `docker run` commands keep working unaltered.
 
 ## Acknowledgements
 
@@ -33,15 +38,17 @@ apptainer exec \
   ggir.sif Rscript /data/GGIR.R
 ```
 
-> **Before your first real run**, set `maxNcores` and leave the image's thread
-> variables alone — see [Configuring parallelism](#configuring-parallelism). The
-> defaults are wrong for containers and scheduled jobs, and the failure is silent.
+> **Before your first real run**, set `maxNcores` — see
+> [Configuring parallelism](#configuring-parallelism). GGIR sizes its worker pool from
+> the host, not from what your container or scheduler actually gave you, and the
+> failure is silent.
 
 ## Available Tags
 
 | Tag | GGIR | Notes |
 |-----|------|-------|
-| **05092026** (Latest) | 3.3-7 | Added unisensR for Movisens (.unisens) format support — pairs with `libxml2-dev` that was previously bundled but unused. `MKL_THREADING_LAYER` switched from `GNU` to `SEQUENTIAL`: no OpenMP runtime loaded into R, so no per-thread address space reserved in each of GGIR's PSOCK workers. (Resident memory is unaffected — see [Configuring parallelism](#thread-environment-variables). This setting also turns out to be what keeps the image working if the thread caps are ever removed.) Container TZ explicitly UTC (pass `desiredtz=` to GGIR for participant local time). `/etc/ggir-version` stamps installed GGIR version + upstream commit SHA for provenance. Build-time smoke test prevents shipping broken images. |
+| **08212026** (Latest) | 3.3-8 | **Intel MKL removed**; the image now uses the base image's OpenBLAS pinned to one thread. Measured indistinguishable from MKL at the settings this image ships with, and **4.34 GB → 1.92 GB**. Also removes a hard failure mode: with the thread variables unset the MKL build died on its first BLAS call, where OpenBLAS simply falls back to all cores. `OPENBLAS_NUM_THREADS=1` replaces `MKL_THREADING_LAYER`/`MKL_NUM_THREADS`. Details in [Phase 1](#phase-1-intel-mkl--tried-measured-removed). |
+| 05092026 | 3.3-7 | Added unisensR for Movisens (.unisens) format support — pairs with `libxml2-dev` that was previously bundled but unused. `MKL_THREADING_LAYER` switched from `GNU` to `SEQUENTIAL`: no OpenMP runtime loaded into R, so no per-thread address space reserved in each of GGIR's PSOCK workers. (Superseded by 08212026, which removed MKL entirely.) Container TZ explicitly UTC (pass `desiredtz=` to GGIR for participant local time). `/etc/ggir-version` stamps installed GGIR version + upstream commit SHA for provenance. Build-time smoke test prevents shipping broken images. |
 | 04152026 | 3.3-4 | Rcpp pre-installed for compatibility with the [Rcpp-optimized GGIR fork](https://github.com/j262byuu/GGIR/tree/feature/rcpp-enmo). Intel MKL as default BLAS/LAPACK backend. GGIR installed from official upstream (wadpac/GGIR). `MKL_NUM_THREADS` locked to 1 by default to prevent thread contention during GGIR's file-level parallelization. UTF-8 locale set for timestamp parsing edge cases. |
 | 04022026 | 3.3-4 | Intel MKL integrated (Debian `intel-mkl`, version 2020.4.304). GGIR from official upstream. Note this is where the image grew: `intel-mkl` pulls ~1.2 GB of MKL packages, ~1.0 GB of it `-dev` files a runtime image never opens. |
 | 03262026 | 3.3-4 | Rebuilt from scratch with a minimal Dockerfile. Base image upgraded to `rocker/r-ver:4.5.3`. `mMARCH.AC` dropped. Image size reduced from 4.36 GB to 1.8 GB. |
@@ -119,8 +126,9 @@ session with its own memory and its own BLAS. Nothing is shared with the parent.
 ### Thread environment variables
 
 Each worker must keep its BLAS single-threaded, or `N` workers x `M` BLAS threads
-oversubscribe the CPU. This image sets that up already; the table is here for when you
-change the BLAS, or run the same script outside the container.
+oversubscribe the CPU. This image ships `OPENBLAS_NUM_THREADS=1` and
+`OMP_NUM_THREADS=1`, so that is already handled; the table is here for when you change
+the BLAS, or run the same script outside the container.
 
 | Library | Variable | Note |
 |---|---|---|
@@ -156,29 +164,23 @@ raise it for that step only:
 data.table::setDTthreads(4)
 ```
 
-### Do not unset the MKL variables
+### Raising the thread count for downstream work
 
-With `MKL_THREADING_LAYER`, `MKL_NUM_THREADS` and `OMP_NUM_THREADS` all unset, R in
-this image dies on its first BLAS call:
-
-```
-R: symbol lookup error: /usr/lib/x86_64-linux-gnu/libmkl_intel_thread.so:
-   undefined symbol: __kmpc_global_thread_num
-```
-
-The Debian `intel-mkl` package ships `libmkl_intel_thread.so`, which needs Intel's own
-OpenMP runtime (`libiomp5`). That runtime is not installed — only `libgomp` is — so
-MKL's default `INTEL` threading layer cannot load. Either `MKL_THREADING_LAYER=SEQUENTIAL`
-or the thread caps prevents this; dropping all three does not.
-
-If you want multithreaded MKL for downstream analysis, use the `GNU` layer, which works
-because `libgomp` is present:
+The thread caps are right for GGIR batch runs and wrong for interactive linear
+algebra. Raise them for that step only, rather than unsetting them image-wide:
 
 ```bash
-MKL_THREADING_LAYER=GNU OMP_NUM_THREADS=8 Rscript your_analysis.R
+OPENBLAS_NUM_THREADS=8 OMP_NUM_THREADS=8 Rscript your_analysis.R
 ```
 
-Do not do this for GGIR runs with `do.parallel = TRUE`.
+Do not do this for GGIR runs with `do.parallel = TRUE` — you would be multiplying the
+worker count by the thread count.
+
+Unsetting them entirely is survivable but rarely what you want: OpenBLAS then takes
+every core it can see, which on a scheduled node is the host's core count rather than
+your allocation, and reserves 136 MB of address space per thread. Earlier tags of this
+image, which used Intel MKL, did not even survive it — see
+[Phase 1](#phase-1-intel-mkl--tried-measured-removed).
 
 ## Performance Optimization Roadmap
 
@@ -197,67 +199,86 @@ counter, which dominates everything here when it is enabled — see Phase 3. And
 75% term lives in `GGIRread`, a separate package, so it is out of scope for this
 image and for the GGIR branches in Phase 2.
 
-### Phase 1: Intel MKL ✅
+### Phase 1: Intel MKL — tried, measured, removed
 
-Replaced default R BLAS/LAPACK with Intel MKL. After profiling GGIR's source code, I confirmed that GGIR's core computations (ENMO, epoch aggregation, non-wear detection) are element-wise vector operations that do not call BLAS. The `g.calibrate` ellipsoid fitting uses `lm.wfit` (QR decomposition), but on matrices of only 3 columns, too small for MKL to make a measurable difference.
+From tag 04022026 to 05092026 this image replaced R's BLAS/LAPACK with Debian's Intel
+MKL. Tag 08212026 removes it and uses the base image's OpenBLAS pinned to one thread.
+This section is kept rather than deleted, because the reasoning that led in was sound
+and the measurement that led back out is the useful part.
 
-**What this actually bought, measured rather than assumed.** Both images below derive
-from `rocker/r-ver:4.5.3` (both report R 4.5.3 on Ubuntu 24.04.4), run back to back on
-the same 16-core host, min of 3 reps, seconds:
+**Why it looked promising.** Profiling GGIR's source showed the core computations
+(ENMO, epoch aggregation, non-wear detection) are element-wise vector operations that
+never call BLAS, and that `g.calibrate`'s ellipsoid fit uses `lm.wfit` on matrices of
+only three columns. So the case for MKL was never throughput — it was per-worker memory
+footprint, on the theory that a threaded BLAS pre-allocates buffers that scale with the
+core count and that MKL under `SEQUENTIAL` allocates none.
+
+**What the measurement showed.** Both images derive from `rocker/r-ver:4.5.3` (both
+report R 4.5.3 on Ubuntu 24.04.4), run back to back on the same 16-core host, min of 3
+reps, seconds:
 
 | Arm | matmul 3000 | crossprod 3000 | chol 3000 | svd 800 | Address space per BLAS thread |
 |---|---|---|---|---|---|
-| MKL `SEQUENTIAL`, 1 thread — **as shipped** | 2.30 | 1.36 | 0.46 | 0.61 | none reserved |
+| MKL `SEQUENTIAL`, 1 thread | 2.30 | 1.36 | 0.46 | 0.61 | none reserved |
 | OpenBLAS, 1 thread | 2.29 | 1.28 | 0.46 | 0.64 | none reserved |
 | MKL `GNU`, 8 threads | 0.54 | 0.37 | 0.13 | 0.30 | 72 MB |
 | OpenBLAS, 8 threads | 0.57 | 0.42 | 0.17 | 0.45 | 136 MB |
 
-Read honestly, that says three things.
+Three readings, in the order they mattered.
 
-*At the settings this image ships with, MKL is indistinguishable from OpenBLAS.* 2.30 s
-against 2.29 s, 0.46 s against 0.46 s, and OpenBLAS is marginally ahead on `crossprod`.
-Neither reserves per-thread address space at one thread. Earlier versions of this README
-attributed the per-worker memory saving to MKL; that was wrong. The saving comes from
-running the BLAS single-threaded, and `OPENBLAS_NUM_THREADS=1` would deliver it just as
-well.
+*At one thread — the only setting this image ever used — MKL and OpenBLAS are
+indistinguishable.* 2.30 s against 2.29 s, 0.46 s against 0.46 s, and OpenBLAS is
+marginally ahead on `crossprod`. Neither reserves per-thread address space. **The
+premise was wrong**: the memory saving that justified MKL comes from running the BLAS
+single-threaded, not from the vendor, and `OPENBLAS_NUM_THREADS=1` delivers it for
+free.
 
-*MKL's real advantage only appears threaded* — 5% faster than OpenBLAS on `matmul` at
-eight threads, rising to 33% on `svd`, and about half the address space per thread:
-72 MB against 136 MB, so 576 MB against 1088 MB at eight threads. That memory
-difference is MKL's one clear win, and it is worth knowing exactly when you can
-collect it. Not during a GGIR run — this image is single-threaded, where neither
-library reserves anything. Only in threaded downstream analysis, which is precisely
-the `MKL_THREADING_LAYER=GNU` recipe below.
+*MKL's genuine advantage is real but unreachable here.* Threaded, it is 5% faster than
+OpenBLAS on `matmul` and 33% on `svd`, and reserves half the address space per thread —
+72 MB against 136 MB, so 576 MB against 1088 MB at eight threads. All of that requires
+threading, which this image disables on purpose.
 
-The stronger version of that claim, the one earlier revisions of this README made, is
-dead: it is address space, not resident memory, even after real BLAS work. Running a
-1000x1000 multiply, `VmRSS` was 106.6 MB at one thread and 108.9 MB at sixteen. The
-buffers are reserved and never touched. Virtual-memory limits notice; the OOM killer
-does not.
+*The stronger memory claim earlier revisions made does not survive.* It is address
+space, not resident memory, even after real BLAS work: running a 1000×1000 multiply,
+`VmRSS` was 106.6 MB at one thread and 108.9 MB at sixteen. The buffers are reserved
+and never touched. Virtual-memory limits notice; the OOM killer does not.
 
-*For general linear algebra this image is slower than the base it is built on* — 4x
-against the eight-thread OpenBLAS arm above, and more than that against the stock
-default, which is not capped at eight. That is the correct trade for GGIR batch
-processing, where the thread discipline is the point, and the wrong one for interactive
-modelling. Raise the thread count for that work: see
-[Do not unset the MKL variables](#do-not-unset-the-mkl-variables) for the safe recipe.
+**What it cost.** Two things, neither of which showed up until they were looked for.
 
-Two costs of the MKL choice, worth stating plainly.
+*Size.* Debian's `intel-mkl` metapackage pulls roughly 1.2 GB of MKL packages, about
+1.0 GB of it `-dev` files a runtime image never opens — `libmkl-computational-dev` at
+640 MB, `libmkl-threading-dev` at 270 MB, `libmkl-interface-dev` at 124 MB. Removing
+MKL took the image from **4.34 GB to 1.92 GB**.
 
-*It is not free in size.* The image is **4.34 GB**. MKL packages account for about
-1.2 GB installed, and roughly 1.0 GB of that is `-dev` packages — `libmkl-computational-dev`
-at 640 MB, `libmkl-threading-dev` at 270 MB, `libmkl-interface-dev` at 124 MB — which a
-runtime image never opens. Debian's `intel-mkl` metapackage pulls them in;
-`libmkl-rt`, `libmkl-core` and `libmkl-sequential` are separately installable, so the
-runtime can be had without them. Note also that the packaged version is
-**2020.4.304**: any statement about MKL here is a statement about a 2020 release, not
-about oneAPI.
+*A hard failure mode.* With `MKL_THREADING_LAYER`, `MKL_NUM_THREADS` and
+`OMP_NUM_THREADS` all unset, R in the MKL image died on its first BLAS call:
 
-*It brings a fragility OpenBLAS would not.* Debian's `intel-mkl` ships a default
-threading layer that cannot load in this image, so `MKL_THREADING_LAYER=SEQUENTIAL` is
-load-bearing for the image to work at all rather than an optimisation. The runtime it
-needs, `libiomp5`, is not packaged for Ubuntu 24.04 at all, so this is not a missing
-`apt install`. Details in [Do not unset the MKL variables](#do-not-unset-the-mkl-variables).
+```
+R: symbol lookup error: /usr/lib/x86_64-linux-gnu/libmkl_intel_thread.so:
+   undefined symbol: __kmpc_global_thread_num
+```
+
+`libmkl_intel_thread.so` needs Intel's own OpenMP runtime, `libiomp5`, which Ubuntu
+24.04 does not package at all — so this was not a missing `apt install`.
+`MKL_THREADING_LAYER=SEQUENTIAL` had been documented as a memory optimisation; it was
+in fact the thing keeping the image alive. The OpenBLAS build has no such edge: unset
+the same variables and it simply falls back to all cores.
+
+It is also worth recording that Debian ships MKL **2020.4.304**. Every number above is
+a statement about a 2020 release, not about oneAPI. A current MKL would fix the
+threading-layer failure and sharpen the threaded kernels — but not the finding that
+decided this, which is structural rather than versional: GGIR's hot paths do not call
+BLAS, so no BLAS is going to move them.
+
+**Verification of the replacement.** Same probe, both images:
+
+| | 08212026 (OpenBLAS) | 05092026 (MKL) |
+|---|---|---|
+| matmul 1000, as shipped | 0.10 s | 0.09 s |
+| BLAS threads, as shipped | 1 | 1 |
+| `getDTthreads()`, as shipped | 1 | 1 |
+| all thread variables unset | works; 16 threads, 0.03 s | **R dies on first BLAS call** |
+| image size | **1.92 GB** | 4.34 GB |
 
 ### Phase 2: Upstream patches to GGIR — measured, not yet submitted
 
@@ -272,7 +293,7 @@ job on one physical host, seven replicates over ten UK Biobank `.cwa` recordings
 
 | Image | BLAS | Effect | Sign |
 |---|---|---|---|
-| this image (MKL `SEQUENTIAL`, already thread-capped) | sequential | **−21.88 s** / −3.32% | 7/7 |
+| this image, already thread-capped (measured on 05092026, when it was MKL `SEQUENTIAL`; 08212026 is single-threaded OpenBLAS and behaves the same way here) | single-threaded | **−21.88 s** / −3.32% | 7/7 |
 | `rocker/r-ver:4.5.3`, a default install | openblas-pthread | **−113.54 s** / −12.19% | 7/7 |
 
 Quote the absolute figure rather than the percentage: the two baselines differ (658 s
@@ -283,7 +304,8 @@ branches below contribute nothing at ten recordings by construction.
 The gap between those two rows is almost entirely one branch,
 `fix/nested-parallelism-thread-explosion`. **Users of this image already have that
 benefit** — the thread variables baked into the Dockerfile do the same job from
-outside — which is why this image's row is the smaller one.
+outside, and that was true of the MKL build and is true of the OpenBLAS one — which is
+why this image's row is the smaller one.
 
 #### Largest and self-contained
 
